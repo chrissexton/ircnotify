@@ -1,4 +1,4 @@
-// © 2014 the AlePale Authors under the WTFPL. See AUTHORS for the list of authors.
+// © 2014 the ircnotify Authors under the WTFPL. See AUTHORS for the list of authors.
 
 package main
 
@@ -8,18 +8,23 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"strings"
 
 	"bitbucket.org/kisom/gopush/pushover"
 	"github.com/kballard/goirc/irc"
 )
 
-var identity = pushover.Identity{}
-var regexps []*regexp.Regexp
-var paused = false
-var playbackStart *regexp.Regexp
-var playbackEnd *regexp.Regexp
+type notifyConfig struct {
+	identity      pushover.Identity
+	regexps       []*regexp.Regexp
+	paused        bool
+	playbackStart *regexp.Regexp
+	playbackEnd   *regexp.Regexp
+	nick          string
+}
 
 func main() {
+
 	token := flag.String("token", "", "Pushover.net API token")
 	userKey := flag.String("userKey", "", "Pushover.net user key")
 	host := flag.String("host", "127.0.0.1", "IRC server to connect")
@@ -31,21 +36,48 @@ func main() {
 	realName := flag.String("realName", "ircuser", "Real name for IRC server")
 	flag.Parse()
 
+	quit := make(chan bool, 1)
+
+	// Used in callbacks
+	myConfig := &notifyConfig{
+		identity: pushover.Identity{
+			Token: *token,
+			User:  *userKey,
+		},
+		regexps: make([]*regexp.Regexp, 0),
+		paused:  false,
+		nick:    *nick,
+	}
+	myConfig.playbackStart, _ = regexp.Compile("Buffer Playback")
+	myConfig.playbackEnd, _ = regexp.Compile("Playback Complete")
+
 	for _, val := range flag.Args() {
-		if r, err := regexp.Compile(val); err != nil {
-			log.Println("Couldn't parse regexp:", val)
+		myConfig.regexps = addRegexp(myConfig.regexps, val)
+	}
+
+	privmsg := func(conn *irc.Conn, line irc.Line) {
+		message := line.Args[1]
+		add, remove := "!add ", "!remove "
+		if line.Src.Nick == *nick && strings.HasPrefix(message, add) {
+			message = strings.Replace(message, add, "", 1)
+			myConfig.regexps = addRegexp(myConfig.regexps, message)
+			log.Println("Added regexp:", message)
+		} else if line.Src.Nick == *nick && strings.HasPrefix(message, remove) {
+			message = strings.Replace(message, remove, "", 1)
+			for i, r := range myConfig.regexps {
+				if r.String() == message {
+					myConfig.regexps = append(myConfig.regexps[:i], myConfig.regexps[i+1:]...)
+					log.Println("Removed regexp:", message)
+				}
+			}
 		} else {
-			regexps = append(regexps, r)
+			checkMsg(myConfig, line.Args[0], line.Src.Nick, message)
 		}
 	}
 
-	playbackStart, _ = regexp.Compile("Buffer Playback")
-	playbackEnd, _ = regexp.Compile("Playback Complete")
-
-	quit := make(chan bool, 1)
-
-	identity.Token = *token
-	identity.User = *userKey
+	action := func(conn *irc.Conn, line irc.Line) {
+		checkMsg(myConfig, line.Dst, line.Src.Nick, line.Args[0])
+	}
 
 	config := irc.Config{
 		Host: *host,
@@ -63,13 +95,13 @@ func main() {
 
 		Init: func(hr irc.HandlerRegistry) {
 			log.Println("init")
-			hr.AddHandler(irc.CONNECTED, h_LoggedIn)
+			hr.AddHandler(irc.CONNECTED, loggedIn)
 			hr.AddHandler(irc.DISCONNECTED, func(*irc.Conn, irc.Line) {
 				log.Println("disconnected")
 				quit <- true
 			})
-			hr.AddHandler("PRIVMSG", h_PRIVMSG)
-			hr.AddHandler(irc.ACTION, h_ACTION)
+			hr.AddHandler("PRIVMSG", privmsg)
+			hr.AddHandler(irc.ACTION, action)
 		},
 	}
 
@@ -83,39 +115,34 @@ func main() {
 	log.Println("Goodbye")
 }
 
-func h_LoggedIn(conn *irc.Conn, line irc.Line) {
+func loggedIn(conn *irc.Conn, line irc.Line) {
 	log.Println("Finished connect")
 }
 
-func h_PRIVMSG(conn *irc.Conn, line irc.Line) {
-	log.Printf("[%s] %s> %s\n", line.Args[0], line.Src, line.Args[1])
-
-	checkMsg(line.Args[0], line.Src.Nick, line.Args[1])
-
-	if line.Args[1] == "!quit" {
-		conn.Quit("")
+func addRegexp(regexps []*regexp.Regexp, val string) []*regexp.Regexp {
+	if r, err := regexp.Compile(val); err != nil {
+		log.Println("Couldn't parse regexp:", val)
+	} else {
+		regexps = append(regexps, r)
 	}
+	return regexps
 }
 
-func h_ACTION(conn *irc.Conn, line irc.Line) {
-	log.Printf("[%s] %s %s\n", line.Dst, line.Src, line.Args[0])
-	checkMsg(line.Dst, line.Src.Nick, line.Args[0])
-}
-
-func checkMsg(channel, sender, message string) {
-	if playbackStart.MatchString(message) {
-		paused = true
+func checkMsg(config *notifyConfig, channel, sender, message string) {
+	if config.playbackStart.MatchString(message) {
+		config.paused = true
 		log.Println("Pausing for buffer playback")
-	} else if playbackEnd.MatchString(message) {
-		paused = false
+	} else if config.playbackEnd.MatchString(message) {
+		config.paused = false
 		log.Println("Unpausing from buffer playback")
 	}
 
-	if !paused {
-		for _, r := range regexps {
+	if !config.paused {
+		for _, r := range config.regexps {
 			if r.MatchString(message) {
 				msg := fmt.Sprintf("%s> %s", sender, message)
-				pushover.Notify_titled(identity, msg, channel)
+				pushover.Notify_titled(config.identity, msg, channel)
+				log.Printf("Sending message: %s: %s", msg, channel)
 			}
 		}
 	}
