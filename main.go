@@ -30,6 +30,7 @@ func main() {
 	host := flag.String("host", "127.0.0.1", "IRC server to connect")
 	port := flag.Uint("port", 6667, "IRC server port")
 	ssl := flag.Bool("ssl", false, "Use SSL for IRC")
+	badSsl := flag.Bool("badSsl", false, "Use unverified SSL for IRC")
 	password := flag.String("password", "", "Password for IRC server")
 	nick := flag.String("nick", "ircuser", "Nick for IRC server")
 	user := flag.String("user", "ircuser", "User for IRC server")
@@ -83,9 +84,9 @@ func main() {
 		Host: *host,
 		Port: *port,
 
-		SSL: *ssl,
+		SSL: *ssl || *badSsl,
 		SSLConfig: &tls.Config{
-			InsecureSkipVerify: true,
+			InsecureSkipVerify: *badSsl,
 		},
 
 		Password: *password,
